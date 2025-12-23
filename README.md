@@ -12,7 +12,7 @@ This project is still under development. Future plans include packaging the bot 
 - Simple text commands
 
 ## Commands 
-- `!join`
+!join  
 !pomodoro <work_minutes> <break_minutes>  
 !stop  
 !leave  
