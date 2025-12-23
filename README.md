@@ -11,8 +11,8 @@ This project is still under development. Future plans include packaging the bot 
 - Auto-mute users who join during a focus session
 - Simple text commands
 
-## Commands  
-!join
+## Commands 
+- `!join`
 !pomodoro <work_minutes> <break_minutes>  
 !stop  
 !leave  
