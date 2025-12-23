@@ -1,0 +1,187 @@
+import discord
+import asyncio
+import os
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+
+# -----------------------------
+# Função utilitária: tocar alarme
+# -----------------------------
+async def play_alarm(ctx):
+    """
+    Toca alarm.mp3 se existir e o bot estiver em canal de voz.
+    Caso contrário, usa fallback de mensagem no canal.
+    Observação: requer FFmpeg + PyNaCl para tocar áudio com sucesso.
+    """
+    vc = ctx.voice_client
+    alarm_file = "alarm.mp3"
+
+    #se estiver conectado ao canal de voz e houver o arquivo, tenta tocar
+    if vc is not None and vc.is_connected() and os.path.exists(alarm_file):
+        try:
+            if vc.is_playing():
+                vc.stop()
+            source = discord.FFmpegPCMAudio(alarm_file)
+            vc.play(source)
+            logger.info("Tocando alarm.mp3 no canal de voz.")
+            #espera terminar de tocar
+            while vc.is_playing():
+                await asyncio.sleep(0.5)
+            return
+        except Exception as e:
+            logger.exception("Erro ao tocar alarm.mp3: %s", e)
+            #continua para fallback
+
+    #fallback simples: enviar mensagem no canal (mais confiável)
+    try:
+        await ctx.send("@here ⏰ **Alarme!**")
+    except Exception as e:
+        logger.warning("Não foi possível enviar mensagem de alarme no canal: %s", e)
+
+    #fallback: enviar mensagem e mencionar canal
+    try:
+        await ctx.send("@here ⏰ **Alarme!**")
+    except Exception:
+        logger.warning("Não foi possível enviar mensagem de alarme no canal.")
+
+
+
+# -----------------------------
+# Função utilitária: mutar/desmutar membros no canal de voz
+# -----------------------------
+async def set_mute_for_channel(channel: discord.VoiceChannel, mute: bool, reason: str = None):
+    """
+    Tenta setar server mute/unmute para todos os membros do channel (exceto bots).
+    Verifica se o bot tem permissão antes de tentar.
+    """
+    #checa permissão do bot no guild
+    me = channel.guild.me
+    if not me.guild_permissions.mute_members:
+        logger.warning("Bot NÃO possui permissão 'mute_members' neste servidor; não será possível mutar usuários.")
+        return
+
+    for member in channel.members:
+        if member.bot:
+            continue
+        try:
+            #server mute (edit) — requer permissão de Mute Members
+            await member.edit(mute=mute, reason=reason)
+        except discord.Forbidden:
+            logger.warning("Sem permissão para alterar mute de %s", member)
+        except Exception as e:
+            logger.exception("Erro ao alterar mute de %s: %s", member, e)
+
+
+
+# -----------------------------
+#  Loop principal do Pomodoro
+# -----------------------------
+async def pomodoro_loop(ctx, work_minutes: int, break_minutes: int, stop_event: asyncio.Event):
+    """
+    Loop infinito: work -> alarm -> break -> alarm -> repeat
+    stop_event é verificado para interromper o loop.
+    """
+    author = ctx.author
+    channel = None
+
+    #tenta determinar o canal de voz do autor (se não encontrar, erro)
+    if author.voice and author.voice.channel:
+        channel = author.voice.channel
+    else:
+        await ctx.send("Você precisa estar em um canal de voz para iniciar o Pomodoro.")
+        return
+
+    #garante que o bot esteja no mesmo canal (tenta conectar)
+    try:
+        if ctx.voice_client is None:
+            await channel.connect()
+            await ctx.send(f"Conectei ao canal de voz **{channel.name}** para gerenciar mutes do Pomodoro.")
+        else:
+            #se já conectado em outro canal, move para o canal do autor
+            if ctx.voice_client.channel.id != channel.id:
+                await ctx.voice_client.move_to(channel)
+                await ctx.send(f"Movido para o canal **{channel.name}** para iniciar Pomodoro.")
+        bot = ctx.bot
+        bot.pomodoro_channel_id = channel.id
+
+    except RuntimeError as e:
+        #comum quando falta PyNaCl
+        logger.exception("Erro ao conectar ao canal de voz (PyNaCl?).")
+        await ctx.send("Não consigo conectar ao canal de voz: verifique se a biblioteca `PyNaCl` está instalada.")
+        return
+    except discord.Forbidden:
+        logger.exception("Sem permissão para conectar ao canal de voz.")
+        await ctx.send("Não tenho permissão para conectar ao canal de voz.")
+        return
+    except Exception as e:
+        logger.exception("Erro ao conectar/mover para canal de voz: %s", e)
+        await ctx.send(f"Erro ao conectar ao canal de voz: {e}")
+        return
+
+    #converte minutos para segundos
+    work_seconds = max(1, int(work_minutes)) * 60
+    break_seconds = max(1, int(break_minutes)) * 60
+
+    logger.info("Iniciando loop Pomodoro: trabalho %d min, pausa %d min", work_minutes, break_minutes)
+
+    cycle = 1
+    try:
+        while not stop_event.is_set():
+            #--- POMODORO (trabalho) ---
+            bot = ctx.bot
+            bot.pomodoro_phase = "work"
+            await ctx.send(f"\n🚀 **Pomodoro {cycle}**: focar por **{work_minutes}** minutos. Mutando usuários...")
+            #recaptura canal (pode ter mudado)
+            voice_chan = ctx.guild.get_channel(bot.pomodoro_channel_id)
+            if voice_chan:
+                await set_mute_for_channel(voice_chan, True, reason="Início do Pomodoro")
+            else:
+                logger.warning("Nenhum canal de voz encontrado para mutar.")
+
+            #espera o tempo de trabalho verificando stop_event
+            for _ in range(work_seconds):
+                if stop_event.is_set():
+                    break
+                await asyncio.sleep(1)
+            if stop_event.is_set():
+                break
+
+            #alarme no fim do pomodoro
+            await play_alarm(ctx)
+
+            # --- PAUSA (break) ---
+            bot.pomodoro_phase = "break"
+            await ctx.send(f"\n☕ **Pausa**: relaxe por **{break_minutes}** minutos. Desmutando usuários...")
+            if voice_chan:
+                await set_mute_for_channel(voice_chan, False, reason="Pausa do Pomodoro")
+
+            for _ in range(break_seconds):
+                if stop_event.is_set():
+                    break
+                await asyncio.sleep(1)
+            if stop_event.is_set():
+                break
+
+            #alarme no fim da pausa
+            await play_alarm(ctx)
+
+            cycle += 1
+
+    except asyncio.CancelledError:
+        logger.info("Pomodoro task cancelada.")
+    except Exception as e:
+        logger.exception("Erro no loop do Pomodoro: %s", e)
+        await ctx.send(f"Ocorreu um erro no loop do Pomodoro: {e}")
+    finally:
+        #tenta desmutar ao sair pra garantir que ninguém fique preso mutado
+        bot.pomodoro_phase = None
+        try:
+            vc_channel = ctx.voice_client.channel if ctx.voice_client else channel
+            if vc_channel:
+                await set_mute_for_channel(vc_channel, False, reason="Pomodoro finalizado")
+        except Exception:
+            logger.exception("Erro ao desmutar membros no final.")
+        logger.info("Loop Pomodoro finalizado.")
