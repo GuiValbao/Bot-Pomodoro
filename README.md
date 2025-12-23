@@ -20,4 +20,4 @@ This project is still under development. Future plans include packaging the bot 
 ## Status
 🚧 Work in progress
 
-Feel free to use or modify this project.
+Feel free to use this project.
