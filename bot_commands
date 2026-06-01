@@ -6,7 +6,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-
 # -----------------------------
 # Função utilitária: tocar alarme
 # -----------------------------
